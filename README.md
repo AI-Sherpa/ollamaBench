@@ -31,7 +31,7 @@ Add `--auto-pull` to let the tool fetch missing models automatically; by default
 Run a full suite defined in YAML:
 ```bash
 ollama-bench run --suite examples/bench_suite.yaml
-ollama-bench run --suite examples/bench_suite.yaml --sync-models
+ollama-bench run --suite examples/bench_suite.yaml --sync-models --auto-pull --keep-pulled
 ```
 The sample suite covers multiple model families (LLaMA, Mistral/Mixtral, Qwen) plus two embedding backends so you can benchmark alternatives side by side—copy it and prune to match the models you have pulled locally.
 
@@ -45,9 +45,9 @@ Check environment readiness:
 ollama-bench doctor
 ```
 Add `--suite path/to/bench.yaml` to preflight model availability and memory requirements before a long run.
-Use `--sync-models` to refresh suite entries against the live Ollama catalog before validation, and `--auto-pull` to fetch anything missing (removed afterward unless `--keep-pulled` is set).
+Use `--sync-models` to refresh suite entries against the live Ollama catalog before validation, and `--auto-pull` to fetch anything missing (use `--keep-pulled` if you want to retain them afterward).
 `doctor` only surfaces tooling expectations that match your OS (e.g., `system_profiler` on macOS, `nvidia-smi` on Linux/NVIDIA boxes).
-Use `--auto-pull` with `doctor --suite` if you want it to fetch missing models for validation (they are removed afterwards unless `--keep-pulled` is set).
+Run `ollama-bench doctor --suite path/to/bench.yaml --sync-models --auto-pull --keep-pulled` to verify setup and keep any freshly pulled models cached.
 
 ## Suite Schema
 See `examples/bench_suite.yaml` for a full example. Each suite can include:

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-bench"
+version = "0.1.0"
+description = "Cross-platform benchmarking utility for Ollama models"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Ollama Bench Contributors"}
+]
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31.0",
+  "psutil>=5.9.0",
+  "PyYAML>=6.0",
+  "pandas>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+ollama-bench = "ollamabench.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

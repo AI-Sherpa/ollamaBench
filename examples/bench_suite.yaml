@@ -1,0 +1,67 @@
+name: local smoke
+ollama_url: http://127.0.0.1:11434
+out_dir: bench_out
+generation:
+- model: llama3.1:latest
+  tag: S
+  prompt: List three use-cases of vector databases.
+  warmup: 1
+  repeats: 5
+  options:
+    temperature: 0
+    seed: 1
+- model: llama3.1:latest
+  tag: M
+  prompt: 'In ~250 words, explain the trade-offs between RAG and fine-tuning for a
+    domain.
+
+    '
+  warmup: 1
+  repeats: 3
+  options:
+    temperature: 0
+    seed: 1
+- model: mistral-nemo:latest
+  tag: S
+  prompt: Summarize three unique strengths of reinforcement learning.
+  warmup: 1
+  repeats: 5
+  options:
+    temperature: 0
+    seed: 1
+#- model: mixtral:latest
+#  tag: L
+#  prompt: 'Provide a 500-word systems design brief for a multi-region vector search
+#    service with hybrid (text + image) ingestion, highlighting caching, sharding,
+#    and failover considerations.
+#
+#    '
+#  warmup: 1
+#  repeats: 3
+#  options:
+#    temperature: 0
+#    seed: 1
+- model: qwen2.5:latest
+  tag: M
+  prompt: 'Draft a product update changelog for a semantic search feature that adds
+    embeddings, reranking, and latency dashboards.
+
+    '
+  warmup: 1
+  repeats: 3
+  options:
+    temperature: 0
+    seed: 1
+embeddings:
+- model: nomic-embed-text:latest
+  tag: E-short
+  text: A quick brown fox jumps over the lazy dog.
+  repeats: 5
+- model: snowflake-arctic-embed:latest
+  tag: E-long
+  text: 'The ollama-bench workflow measures TTFT, decode throughput, and ingest throughput
+    across heterogeneous hardware. It records system metadata, aggregates results,
+    and keeps runs reproducible with deterministic defaults.
+
+    '
+  repeats: 3

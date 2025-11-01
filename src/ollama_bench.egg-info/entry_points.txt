@@ -1,0 +1,2 @@
+[console_scripts]
+ollama-bench = ollamabench.cli:main

@@ -3,4 +3,6 @@ __pycache__/
 *.py[cod]
 bench_out*/
 bench_out_quick/
+.bench_out/
+comp_bench_out/
 .pytest_cache/

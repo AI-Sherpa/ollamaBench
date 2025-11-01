@@ -8,6 +8,8 @@ import re
 import statistics
 import subprocess
 import sys
+import webbrowser
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -92,6 +94,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     quick.add_argument("--json", dest="json_alias", action="store_true", help="Emit machine-readable JSON (alias)")
     quick.add_argument(
+        "--print-results",
+        action="store_true",
+        help="Open a simple HTML summary after the run completes",
+    )
+    quick.add_argument(
         "--auto-pull",
         action="store_true",
         help="Automatically pull missing models before running (removed afterwards by default)",
@@ -120,6 +127,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Query the Ollama catalog and update suite model names before running",
     )
     run.add_argument("--json", dest="json_alias", action="store_true", help="Emit machine-readable JSON (alias)")
+    run.add_argument(
+        "--print-results",
+        action="store_true",
+        help="Open a simple HTML summary after the run completes",
+    )
 
     validate = subparsers.add_parser("validate", help="validate a suite without running it")
     validate.add_argument("--suite", required=True, help="Path to suite YAML file")
@@ -152,6 +164,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("--json", dest="json_alias", action="store_true", help="Emit machine-readable JSON (alias)")
 
+    show = subparsers.add_parser("show", help="inspect results from a previous run")
+    show.add_argument("--out-dir", default="bench_out", help="Directory containing benchmark outputs (default: bench_out)")
+    show.add_argument("--json", dest="json_alias", action="store_true", help="Emit machine-readable JSON")
+    show.add_argument("--print-results", action="store_true", help="Generate/open an HTML summary of the existing results")
+
     return parser
 
 
@@ -165,6 +182,246 @@ def _median(values: List[float]) -> Optional[float]:
 def _print_warning(message: str) -> None:
     sys.stderr.write(f"[ollama-bench] warning: {message}\n")
 
+
+def _load_rows_from_out_dir(out_dir: Path) -> List[Dict[str, Any]]:
+    jsonl_path = out_dir / "results.jsonl"
+    if jsonl_path.exists():
+        rows: List[Dict[str, Any]] = []
+        with jsonl_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(f"Failed to parse {jsonl_path}: {exc}") from exc
+        return rows
+
+    csv_path = out_dir / "results.csv"
+    if csv_path.exists():
+        import csv
+
+        with csv_path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            return [row for row in reader]
+
+    raise SystemExit(
+        f"No benchmark results found in '{out_dir}'. Expected results.jsonl or results.csv."
+    )
+
+
+def _format_number(value: Optional[float], *, precision: int = 3) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.{precision}f}"
+
+
+_HEADER_LABELS = {
+    "ttft_sec": "ttft_sec ↓",
+    "total_time_sec": "total_time_sec ↓",
+    "decode_time_sec": "decode_time_sec ↓",
+    "ingest_toks_per_sec": "ingest_toks_per_sec ↑",
+    "decode_toks_per_sec": "decode_toks_per_sec ↑",
+    "elapsed_sec": "elapsed_sec ↓",
+    "throughput_text_chars_per_sec": "throughput_chars_per_sec ↑",
+    "dim": "dim ↕",
+    "text_chars": "text_chars",
+    "trials": "trials",
+    "model": "model",
+    "tag": "tag",
+}
+
+
+def _summarize_generation_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups: Dict[Tuple[str, Optional[str]], Dict[str, List[float]]] = defaultdict(
+        lambda: {
+            "ttft_sec": [],
+            "total_time_sec": [],
+            "decode_time_sec": [],
+            "decode_toks_per_sec": [],
+            "ingest_toks_per_sec": [],
+            "trials": [],
+        }
+    )
+    for row in rows:
+        if row.get("kind") != "generate":
+            continue
+        key = (row.get("model") or "?", row.get("tag"))
+        groups[key]["trials"].append(1.0)
+        for metric in ("ttft_sec", "total_time_sec", "decode_time_sec", "decode_toks_per_sec", "ingest_toks_per_sec"):
+            value = row.get(metric)
+            if value is not None:
+                groups[key][metric].append(float(value))
+
+    summary: List[Dict[str, Any]] = []
+    for (model, tag), metrics in sorted(groups.items(), key=lambda item: item[0]):
+        entry: Dict[str, Any] = {
+            "model": model,
+            "tag": tag or "-",
+            "trials": len(metrics["trials"]),
+        }
+        for metric in ("ttft_sec", "total_time_sec", "decode_time_sec", "decode_toks_per_sec", "ingest_toks_per_sec"):
+            values = metrics[metric]
+            entry[metric] = _median(values) if values else None
+        summary.append(entry)
+    return summary
+
+
+def _summarize_embedding_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    groups: Dict[Tuple[str, Optional[str]], Dict[str, List[float]]] = defaultdict(
+        lambda: {
+            "elapsed_sec": [],
+            "throughput_text_chars_per_sec": [],
+            "text_chars": [],
+            "trials": [],
+            "dim": [],
+        }
+    )
+    for row in rows:
+        if row.get("kind") != "embedding":
+            continue
+        key = (row.get("model") or "?", row.get("tag"))
+        groups[key]["trials"].append(1.0)
+        for metric in ("elapsed_sec", "throughput_text_chars_per_sec", "text_chars"):
+            value = row.get(metric)
+            if value is not None:
+                groups[key][metric].append(float(value))
+        dim = row.get("dim")
+        if isinstance(dim, (int, float)):
+            groups[key]["dim"].append(float(dim))
+
+    summary: List[Dict[str, Any]] = []
+    for (model, tag), metrics in sorted(groups.items(), key=lambda item: item[0]):
+        entry: Dict[str, Any] = {
+            "model": model,
+            "tag": tag or "-",
+            "trials": len(metrics["trials"]),
+            "elapsed_sec": _median(metrics["elapsed_sec"]) if metrics["elapsed_sec"] else None,
+            "throughput_text_chars_per_sec": _median(metrics["throughput_text_chars_per_sec"]) if metrics["throughput_text_chars_per_sec"] else None,
+            "text_chars": _median(metrics["text_chars"]) if metrics["text_chars"] else None,
+            "dim": int(_median(metrics["dim"])) if metrics["dim"] else None,
+        }
+        summary.append(entry)
+    return summary
+
+
+def _print_human_summary(rows: Iterable[Dict[str, Any]]) -> None:
+    generation_summary = _summarize_generation_rows(rows)
+    embedding_summary = _summarize_embedding_rows(rows)
+
+    if not generation_summary and not embedding_summary:
+        print("[ollama-bench] no benchmark rows recorded", file=sys.stderr)
+        return
+
+    print("[ollama-bench] Summary:")
+    if generation_summary:
+        print("  Text Generation:")
+        for entry in generation_summary:
+            print(
+                "    - {model} [{tag}] trials={trials} ttft↓={ttft}s total↓={total}s decode↓={decode}s ingest↑={ingest} decode↑={decode_tps}".format(
+                    model=entry["model"],
+                    tag=entry["tag"],
+                    trials=entry["trials"],
+                    ttft=_format_number(entry["ttft_sec"]),
+                    total=_format_number(entry["total_time_sec"]),
+                    decode=_format_number(entry["decode_time_sec"]),
+                    ingest=_format_number(entry["ingest_toks_per_sec"]),
+                    decode_tps=_format_number(entry["decode_toks_per_sec"]),
+                )
+            )
+
+
+def _write_html_summary(rows: Iterable[Dict[str, Any]], out_dir: Path) -> Path:
+    generation_summary = _summarize_generation_rows(rows)
+    embedding_summary = _summarize_embedding_rows(rows)
+
+    def table_html(summary: List[Dict[str, Any]], headers: List[str]) -> str:
+        if not summary:
+            return "<p>No data</p>"
+        rows_html = [
+            "<tr>"
+            + "".join(
+                f"<th>{_HEADER_LABELS.get(header, header)}</th>" for header in headers
+            )
+            + "</tr>"
+        ]
+        for entry in summary:
+            cells = []
+            for header in headers:
+                value = entry.get(header)
+                if isinstance(value, float):
+                    cells.append(f"<td>{_format_number(value)}</td>")
+                else:
+                    cells.append(f"<td>{value if value is not None else '-'}" + "</td>")
+            rows_html.append("<tr>" + "".join(cells) + "</tr>")
+        return "<table>" + "".join(rows_html) + "</table>"
+
+    html_parts = [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        "<meta charset='utf-8'>",
+        "<title>ollama-bench results</title>",
+        "<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;max-width:960px;}table{border-collapse:collapse;margin-bottom:1.5rem;width:100%;}th,td{border:1px solid #ccc;padding:0.45rem 0.8rem;text-align:left;}th{background:#f4f4f4;}h1,h2,h3{margin-top:1.8rem;}p.meta{color:#555;}code{background:#f4f4f4;padding:0 0.3rem;border-radius:3px;}</style>",
+        "</head>",
+        "<body>",
+        "<h1>ollama-bench results</h1>",
+        "<p class='meta'>Fields: <strong>ttft_sec</strong> (time-to-first-token, lower is better), <strong>total_time_sec</strong> (end-to-end latency, lower is better), <strong>decode_time_sec</strong> (generation time, lower is better), <strong>ingest_toks_per_sec</strong> (prompt ingest throughput, higher is better), <strong>decode_toks_per_sec</strong> (token generation throughput, higher is better), <strong>elapsed_sec</strong> (embedding latency, lower is better), <strong>throughput_text_chars_per_sec</strong> (embedding throughput, higher is better), <strong>dim</strong> (embedding dimension).</p>",
+        "<p class='meta'>Status shows whether a run <code>completed</code> or was <code>interrupted</code>. Warmups are omitted from recorded trials.</p>",
+    ]
+
+    html_parts.append("<h2>Text Generation</h2>")
+    html_parts.append(
+        table_html(
+            generation_summary,
+            [
+                "model",
+                "tag",
+                "trials",
+                "ttft_sec",
+                "total_time_sec",
+                "decode_time_sec",
+                "ingest_toks_per_sec",
+                "decode_toks_per_sec",
+            ],
+        )
+    )
+
+    html_parts.append("<h2>Embeddings</h2>")
+    html_parts.append(
+        table_html(
+            embedding_summary,
+            [
+                "model",
+                "tag",
+                "trials",
+                "elapsed_sec",
+                "throughput_text_chars_per_sec",
+                "text_chars",
+                "dim",
+            ],
+        )
+    )
+
+    html_parts.extend(["</body>", "</html>"])
+    html = "\n".join(html_parts)
+    out_path = (out_dir / "results.html").resolve()
+    out_path.write_text(html, encoding="utf-8")
+    return out_path
+    if embedding_summary:
+        print("  Embeddings:")
+        for entry in embedding_summary:
+            print(
+                "    - {model} [{tag}] trials={trials} elapsed↓={elapsed}s throughput↑={throughput} chars/sec dim={dim}".format(
+                    model=entry["model"],
+                    tag=entry["tag"],
+                    trials=entry["trials"],
+                    elapsed=_format_number(entry["elapsed_sec"]),
+                    throughput=_format_number(entry["throughput_text_chars_per_sec"]),
+                    dim=entry["dim"] if entry["dim"] is not None else "-",
+                )
+            )
 
 def _parse_parameter_count(raw: Any) -> Optional[float]:
     if raw is None:
@@ -826,13 +1083,28 @@ def _run_quick(args: argparse.Namespace) -> Dict[str, Any]:
     if not PANDAS_AVAILABLE:
         _print_warning("pandas not installed - CSV summarisation limited")
 
-    return {
+    html_summary_path: Optional[Path] = None
+    result_payload = {
         "out_dir": str(out_dir),
         "rows_written": len(rows),
         "outputs": {name: str(path) for name, path in outputs.items()},
         "metrics_median": metrics,
         "status": status,
     }
+    if rows and getattr(args, "print_results", False):
+        try:
+            html_summary_path = _write_html_summary(rows, out_dir)
+            if not args.quiet and not _wants_json(args):
+                print(f"[ollama-bench] HTML summary: {html_summary_path}")
+            webbrowser.open(html_summary_path.as_uri())
+        except Exception as exc:  # pragma: no cover - best effort UX
+            _print_warning(f"Failed to open HTML summary: {exc}")
+    if html_summary_path is not None:
+        result_payload["html_summary"] = str(html_summary_path)
+        meta["html_summary"] = str(html_summary_path)
+    if not _wants_json(args) and not args.quiet:
+        _print_human_summary(rows)
+    return result_payload
 
 
 def _suite_to_jobs(suite_path: str) -> "SuiteConfig":
@@ -913,13 +1185,28 @@ def _run_suite(args: argparse.Namespace) -> Dict[str, Any]:
 
     write_json(out_dir / "meta.json", meta)
 
-    return {
+    html_summary_path: Optional[Path] = None
+    result_payload = {
         "suite": suite.name,
         "out_dir": str(out_dir),
         "rows_written": len(rows),
         "outputs": {name: str(path) for name, path in outputs.items()},
         "status": status,
     }
+    if rows and getattr(args, "print_results", False):
+        try:
+            html_summary_path = _write_html_summary(rows, out_dir)
+            if not args.quiet and not _wants_json(args):
+                print(f"[ollama-bench] HTML summary: {html_summary_path}")
+            webbrowser.open(html_summary_path.as_uri())
+        except Exception as exc:  # pragma: no cover - best effort UX
+            _print_warning(f"Failed to open HTML summary: {exc}")
+    if html_summary_path is not None:
+        result_payload["html_summary"] = str(html_summary_path)
+        meta["html_summary"] = str(html_summary_path)
+    if not _wants_json(args) and not args.quiet:
+        _print_human_summary(rows)
+    return result_payload
 
 
 def _run_validate(args: argparse.Namespace) -> Dict[str, Any]:
@@ -931,6 +1218,37 @@ def _run_validate(args: argparse.Namespace) -> Dict[str, Any]:
         "ollama_url": suite.ollama_url,
         "status": "ok",
     }
+
+
+def _run_show(args: argparse.Namespace) -> Dict[str, Any]:
+    out_dir = Path(args.out_dir)
+    rows = _load_rows_from_out_dir(out_dir)
+    generation_summary = _summarize_generation_rows(rows)
+    embedding_summary = _summarize_embedding_rows(rows)
+
+    html_summary_path: Optional[Path] = None
+    if rows and getattr(args, "print_results", False):
+        try:
+            html_summary_path = _write_html_summary(rows, out_dir)
+            if not args.quiet and not _wants_json(args):
+                print(f"[ollama-bench] HTML summary: {html_summary_path}")
+            webbrowser.open(html_summary_path.as_uri())
+        except Exception as exc:  # pragma: no cover
+            _print_warning(f"Failed to open HTML summary: {exc}")
+
+    payload = {
+        "out_dir": str(out_dir),
+        "rows_recorded": len(rows),
+        "generation_summary": generation_summary,
+        "embedding_summary": embedding_summary,
+    }
+    if html_summary_path is not None:
+        payload["html_summary"] = str(html_summary_path)
+
+    if not _wants_json(args) and not args.quiet:
+        _print_human_summary(rows)
+
+    return payload
 def _run_doctor(args: argparse.Namespace) -> Dict[str, Any]:
     client = OllamaClient(args.ollama_url)
 
@@ -1078,6 +1396,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = _run_suite(args)
     elif args.command == "validate":
         result = _run_validate(args)
+    elif args.command == "show":
+        result = _run_show(args)
     elif args.command == "doctor":
         result = _run_doctor(args)
         if not _wants_json(args):

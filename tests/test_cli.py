@@ -334,6 +334,77 @@ def test_cli_quick_auto_pull(tmp_path: Path, capsys: pytest.CaptureFixture[str],
     assert not available
 
 
+def test_cli_quick_print_results(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    out_dir = tmp_path / "quick_out"
+    html_paths: List[str] = []
+
+    def fake_open(uri: str) -> None:
+        html_paths.append(uri)
+
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
+
+    rc = cli.main(
+        [
+            "--json",
+            "quick",
+            "--model",
+            "llama3",
+            "--prompt",
+            "summary",
+            "--out-dir",
+            str(out_dir),
+            "--print-results",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    html_summary = Path(payload["html_summary"])
+    assert html_summary.exists()
+    assert html_paths and html_paths[0] == html_summary.as_uri()
+
+
+def test_cli_show_existing_results(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out_dir = tmp_path / "bench_out"
+    out_dir.mkdir()
+    rows = [
+        {
+            "kind": "generate",
+            "ts": "2024-01-01T00:00:00+00:00",
+            "bench_version": "0.1",
+            "model": "llama3",
+            "tag": "S",
+            "prompt_chars": 10,
+            "ttft_sec": 0.2,
+            "total_time_sec": 1.0,
+            "decode_time_sec": 0.8,
+            "ingest_toks_per_sec": 50.0,
+            "decode_toks_per_sec": 20.0,
+        },
+        {
+            "kind": "embedding",
+            "ts": "2024-01-01T00:00:02+00:00",
+            "bench_version": "0.1",
+            "model": "embed",
+            "tag": "E",
+            "text_chars": 100,
+            "elapsed_sec": 0.5,
+            "throughput_text_chars_per_sec": 200.0,
+            "dim": 768,
+        },
+    ]
+    jsonl_path = out_dir / "results.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+    rc = cli.main(["show", "--out-dir", str(out_dir), "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows_recorded"] == 2
+    assert payload["generation_summary"]
+    assert payload["embedding_summary"]
+
+
 def test_cli_run_sync_models_updates_suite(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

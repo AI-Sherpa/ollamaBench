@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>ollama-bench comparative results</title>
+<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;max-width:1000px;}table{border-collapse:collapse;margin-bottom:1.5rem;width:100%;}th,td{border:1px solid #ccc;padding:0.45rem 0.8rem;text-align:left;}th{background:#f4f4f4;}h1,h2{margin-top:1.8rem;}p.meta{color:#555;}code{background:#f4f4f4;padding:0 0.3rem;border-radius:3px;}.best{background:#d9f5d0;font-weight:bold;}</style>
+</head>
+<body>
+<h1>ollama-bench comparative results</h1>
+<p class='meta'>Columns flagged with ↓ mean lower values are better; columns flagged with ↑ mean higher values are better.</p>
+<h2>Text Generation (system medians)</h2>
+<table><tr><th>system</th><th>ttft_sec ↓</th><th>total_time_sec ↓</th><th>decode_time_sec ↓</th><th>ingest_toks_per_sec ↑</th><th>decode_toks_per_sec ↑</th></tr><tr><td>bench_out_M3-MAX-MBP</td><td class='best'>0.080</td><td class='best'>4.234</td><td class='best'>4.144</td><td class='best'>242.756</td><td class='best'>61.886</td></tr><tr><td>bench_out_M4-MBA</td><td>0.195</td><td>41.177</td><td>40.989</td><td>127.290</td><td>9.481</td></tr></table>
+<h2>Embeddings (system medians)</h2>
+<table><tr><th>system</th><th>elapsed_sec ↓</th><th>throughput_chars_per_sec ↑</th><th>text_chars</th><th>dim ↕</th></tr><tr><td>bench_out_M3-MAX-MBP</td><td class='best'>0.022</td><td class='best'>3186.621</td><td>42.000</td><td>768.000</td></tr><tr><td>bench_out_M4-MBA</td><td>0.060</td><td>1975.203</td><td>42.000</td><td>768.000</td></tr></table>
+</body>
+</html>

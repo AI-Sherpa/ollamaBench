@@ -168,6 +168,11 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("--out-dir", default="bench_out", help="Directory containing benchmark outputs (default: bench_out)")
     show.add_argument("--json", dest="json_alias", action="store_true", help="Emit machine-readable JSON")
     show.add_argument("--print-results", action="store_true", help="Generate/open an HTML summary of the existing results")
+    show.add_argument(
+        "--print-comparative-results",
+        action="store_true",
+        help="Aggregate results across all subdirectories and highlight the best system per metric",
+    )
 
     return parser
 
@@ -211,6 +216,22 @@ def _load_rows_from_out_dir(out_dir: Path) -> List[Dict[str, Any]]:
     )
 
 
+def _collect_system_runs(parent_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
+    systems: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in sorted(parent_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        try:
+            systems[entry.name] = _load_rows_from_out_dir(entry)
+        except SystemExit as exc:
+            _print_warning(f"Skipping '{entry}': {exc}")
+    if not systems:
+        raise SystemExit(
+            f"No benchmark outputs found under '{parent_dir}'. Ensure it contains subdirectories with results.jsonl or results.csv."
+        )
+    return systems
+
+
 def _format_number(value: Optional[float], *, precision: int = 3) -> str:
     if value is None:
         return "-"
@@ -230,6 +251,16 @@ _HEADER_LABELS = {
     "trials": "trials",
     "model": "model",
     "tag": "tag",
+}
+
+_METRIC_DIRECTIONS = {
+    "ttft_sec": "min",
+    "total_time_sec": "min",
+    "decode_time_sec": "min",
+    "ingest_toks_per_sec": "max",
+    "decode_toks_per_sec": "max",
+    "elapsed_sec": "min",
+    "throughput_text_chars_per_sec": "max",
 }
 
 
@@ -306,6 +337,62 @@ def _summarize_embedding_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, 
     return summary
 
 
+def _aggregate_generation_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    metrics = {metric: [] for metric in ("ttft_sec", "total_time_sec", "decode_time_sec", "ingest_toks_per_sec", "decode_toks_per_sec")}
+    for row in rows:
+        if row.get("kind") != "generate":
+            continue
+        for metric in metrics:
+            value = row.get(metric)
+            if value is not None:
+                metrics[metric].append(float(value))
+    return {metric: (_median(values) if values else None) for metric, values in metrics.items()}
+
+
+def _aggregate_embedding_metrics(rows: Iterable[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+    metrics = {metric: [] for metric in ("elapsed_sec", "throughput_text_chars_per_sec", "text_chars", "dim")}
+    for row in rows:
+        if row.get("kind") != "embedding":
+            continue
+        for metric in metrics:
+            value = row.get(metric)
+            if value is not None:
+                metrics[metric].append(float(value))
+    aggregated: Dict[str, Optional[float]] = {}
+    for metric, values in metrics.items():
+        if not values:
+            aggregated[metric] = None
+        elif metric == "dim":
+            aggregated[metric] = float(round(_median(values)))
+        else:
+            aggregated[metric] = _median(values)
+    return aggregated
+
+
+def _best_per_metric(summary: List[Dict[str, Any]], metrics: List[str]) -> Dict[str, Set[str]]:
+    best: Dict[str, Set[str]] = {metric: set() for metric in metrics}
+    for metric in metrics:
+        direction = _METRIC_DIRECTIONS.get(metric)
+        if not direction:
+            continue
+        values: List[Tuple[str, float]] = []
+        for entry in summary:
+            value = entry.get(metric)
+            if value is None:
+                continue
+            values.append((entry["system"], float(value)))
+        if not values:
+            continue
+        if direction == "min":
+            best_value = min(value for _, value in values)
+        else:
+            best_value = max(value for _, value in values)
+        for system_name, value in values:
+            if abs(value - best_value) < 1e-9:
+                best[metric].add(system_name)
+    return best
+
+
 def _print_human_summary(rows: Iterable[Dict[str, Any]]) -> None:
     generation_summary = _summarize_generation_rows(rows)
     embedding_summary = _summarize_embedding_rows(rows)
@@ -363,7 +450,7 @@ def _write_html_summary(rows: Iterable[Dict[str, Any]], out_dir: Path) -> Path:
         "<head>",
         "<meta charset='utf-8'>",
         "<title>ollama-bench results</title>",
-        "<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;max-width:960px;}table{border-collapse:collapse;margin-bottom:1.5rem;width:100%;}th,td{border:1px solid #ccc;padding:0.45rem 0.8rem;text-align:left;}th{background:#f4f4f4;}h1,h2,h3{margin-top:1.8rem;}p.meta{color:#555;}code{background:#f4f4f4;padding:0 0.3rem;border-radius:3px;}</style>",
+        "<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;max-width:960px;}table{border-collapse:collapse;margin-bottom:1.5rem;width:100%;}th,td{border:1px solid #ccc;padding:0.45rem 0.8rem;text-align:left;}th{background:#f4f4f4;}h1,h2,h3{margin-top:1.8rem;}p.meta{color:#555;}code{background:#f4f4f4;padding:0 0.3rem;border-radius:3px;}.best{background:#d9f5d0;font-weight:bold;}</style>",
         "</head>",
         "<body>",
         "<h1>ollama-bench results</h1>",
@@ -409,6 +496,65 @@ def _write_html_summary(rows: Iterable[Dict[str, Any]], out_dir: Path) -> Path:
     out_path = (out_dir / "results.html").resolve()
     out_path.write_text(html, encoding="utf-8")
     return out_path
+
+
+def _write_comparative_html(
+    parent_dir: Path,
+    generation_summary: List[Dict[str, Any]],
+    embedding_summary: List[Dict[str, Any]],
+) -> Path:
+    gen_metrics = ["ttft_sec", "total_time_sec", "decode_time_sec", "ingest_toks_per_sec", "decode_toks_per_sec"]
+    emb_metrics = ["elapsed_sec", "throughput_text_chars_per_sec", "text_chars", "dim"]
+
+    gen_best = _best_per_metric(generation_summary, gen_metrics)
+    emb_best = _best_per_metric(embedding_summary, emb_metrics)
+
+    def table(summary: List[Dict[str, Any]], metrics: List[str], best_map: Dict[str, Set[str]]) -> str:
+        if not summary:
+            return "<p>No data</p>"
+        headers = ["system"] + metrics
+        rows_html = [
+            "<tr>"
+            + "".join(f"<th>{_HEADER_LABELS.get(header, header)}</th>" for header in headers)
+            + "</tr>"
+        ]
+        for entry in summary:
+            cells = [f"<td>{entry['system']}</td>"]
+            for metric in metrics:
+                value = entry.get(metric)
+                display = _format_number(value) if isinstance(value, float) else ("-" if value is None else value)
+                cls = "best" if entry["system"] in best_map.get(metric, set()) else ""
+                if cls:
+                    cells.append(f"<td class='best'>{display}</td>")
+                else:
+                    cells.append(f"<td>{display}</td>")
+            rows_html.append("<tr>" + "".join(cells) + "</tr>")
+        return "<table>" + "".join(rows_html) + "</table>"
+
+    html_parts = [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<head>",
+        "<meta charset='utf-8'>",
+        "<title>ollama-bench comparative results</title>",
+        "<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;max-width:1000px;}table{border-collapse:collapse;margin-bottom:1.5rem;width:100%;}th,td{border:1px solid #ccc;padding:0.45rem 0.8rem;text-align:left;}th{background:#f4f4f4;}h1,h2{margin-top:1.8rem;}p.meta{color:#555;}code{background:#f4f4f4;padding:0 0.3rem;border-radius:3px;}.best{background:#d9f5d0;font-weight:bold;}</style>",
+        "</head>",
+        "<body>",
+        "<h1>ollama-bench comparative results</h1>",
+        "<p class='meta'>Columns flagged with ↓ mean lower values are better; columns flagged with ↑ mean higher values are better.</p>",
+    ]
+
+    html_parts.append("<h2>Text Generation (system medians)</h2>")
+    html_parts.append(table(generation_summary, gen_metrics, gen_best))
+
+    html_parts.append("<h2>Embeddings (system medians)</h2>")
+    html_parts.append(table(embedding_summary, emb_metrics, emb_best))
+
+    html_parts.extend(["</body>", "</html>"])
+
+    out_path = (parent_dir / "comparative_results.html").resolve()
+    out_path.write_text("\n".join(html_parts), encoding="utf-8")
+    return out_path
     if embedding_summary:
         print("  Embeddings:")
         for entry in embedding_summary:
@@ -420,6 +566,34 @@ def _write_html_summary(rows: Iterable[Dict[str, Any]], out_dir: Path) -> Path:
                     elapsed=_format_number(entry["elapsed_sec"]),
                     throughput=_format_number(entry["throughput_text_chars_per_sec"]),
                     dim=entry["dim"] if entry["dim"] is not None else "-",
+                )
+            )
+
+
+def _print_comparative_summary(gen_summary: List[Dict[str, Any]], emb_summary: List[Dict[str, Any]]) -> None:
+    print("[ollama-bench] Comparative Summary:")
+    if gen_summary:
+        print("  Text Generation (system medians):")
+        for entry in gen_summary:
+            print(
+                "    - {system}: ttft↓={ttft}s total↓={total}s decode↓={decode}s ingest↑={ingest} decode↑={decode_tps}".format(
+                    system=entry["system"],
+                    ttft=_format_number(entry.get("ttft_sec")),
+                    total=_format_number(entry.get("total_time_sec")),
+                    decode=_format_number(entry.get("decode_time_sec")),
+                    ingest=_format_number(entry.get("ingest_toks_per_sec")),
+                    decode_tps=_format_number(entry.get("decode_toks_per_sec")),
+                )
+            )
+    if emb_summary:
+        print("  Embeddings (system medians):")
+        for entry in emb_summary:
+            print(
+                "    - {system}: elapsed↓={elapsed}s throughput↑={throughput} chars/sec dim={dim}".format(
+                    system=entry["system"],
+                    elapsed=_format_number(entry.get("elapsed_sec")),
+                    throughput=_format_number(entry.get("throughput_text_chars_per_sec")),
+                    dim=int(entry.get("dim")) if entry.get("dim") is not None else "-",
                 )
             )
 
@@ -1222,6 +1396,41 @@ def _run_validate(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _run_show(args: argparse.Namespace) -> Dict[str, Any]:
     out_dir = Path(args.out_dir)
+    if getattr(args, "print_comparative_results", False):
+        systems = _collect_system_runs(out_dir)
+        generation_summary: List[Dict[str, Any]] = []
+        embedding_summary: List[Dict[str, Any]] = []
+        for system_name, rows in systems.items():
+            gen_metrics = _aggregate_generation_metrics(rows)
+            emb_metrics = _aggregate_embedding_metrics(rows)
+            generation_summary.append({"system": system_name, **gen_metrics})
+            embedding_summary.append({"system": system_name, **emb_metrics})
+
+        generation_summary.sort(key=lambda item: item["system"])
+        embedding_summary.sort(key=lambda item: item["system"])
+
+        html_summary_path: Optional[Path] = None
+        if getattr(args, "print_results", False) or getattr(args, "print_comparative_results", False):
+            try:
+                html_summary_path = _write_comparative_html(out_dir, generation_summary, embedding_summary)
+                if not args.quiet and not _wants_json(args):
+                    print(f"[ollama-bench] Comparative HTML summary: {html_summary_path}")
+                webbrowser.open(html_summary_path.as_uri())
+            except Exception as exc:  # pragma: no cover
+                _print_warning(f"Failed to open HTML summary: {exc}")
+
+        payload = {
+            "out_dir": str(out_dir),
+            "systems": sorted(systems.keys()),
+            "comparative_generation_summary": generation_summary,
+            "comparative_embedding_summary": embedding_summary,
+        }
+        if html_summary_path is not None:
+            payload["comparative_html"] = str(html_summary_path)
+        if not _wants_json(args) and not args.quiet:
+            _print_comparative_summary(generation_summary, embedding_summary)
+        return payload
+
     rows = _load_rows_from_out_dir(out_dir)
     generation_summary = _summarize_generation_rows(rows)
     embedding_summary = _summarize_embedding_rows(rows)

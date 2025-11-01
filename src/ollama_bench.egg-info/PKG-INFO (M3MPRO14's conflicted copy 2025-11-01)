@@ -1,3 +1,41 @@
+Metadata-Version: 2.4
+Name: ollama-bench
+Version: 0.1.0
+Summary: Cross-platform benchmarking utility for Ollama models
+Author: Ollama Bench Contributors
+License: MIT License
+        
+        Copyright (c) 2024 Ollama Bench Contributors
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests>=2.31.0
+Requires-Dist: psutil>=5.9.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: pandas>=2.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Dynamic: license-file
+
 # ollama-bench
 
 `ollama-bench` is a cross-platform CLI utility for benchmarking [Ollama](https://ollama.ai) models. It focuses on reproducible measurements, portable telemetry, and a user-friendly experience across macOS, Linux (x86/NVIDIA), and Jetson devices.
@@ -27,12 +65,11 @@ ollama-bench quick --model llama3:8b --prompt "Hello, Ollama!"
 If the model is not already loaded locally, the command will exit and prompt you to run `ollama pull <model>` (or `ollama run <model>` once) before retrying.
 ollama-bench also estimates whether the model can fit into current system/GPU memory and exits early with guidance if resources look too tight.
 Add `--auto-pull` to let the tool fetch missing models automatically; by default they are removed after the run (use `--keep-pulled` if you want to retain them). If you interrupt a run with `Ctrl+C`, completed trials are still written out and the summary reports `status: interrupted` so you can resume later.
-Use `--print-results` to launch a simple HTML dashboard of the latest results after the run finishes.
 
 Run a full suite defined in YAML:
 ```bash
 ollama-bench run --suite examples/bench_suite.yaml
-ollama-bench run --suite examples/bench_suite.yaml --sync-models --auto-pull --keep-pulled --print-results
+ollama-bench run --suite examples/bench_suite.yaml --sync-models
 ```
 The sample suite covers multiple model families (LLaMA, Mistral/Mixtral, Qwen) plus two embedding backends so you can benchmark alternatives side by side—copy it and prune to match the models you have pulled locally.
 
@@ -41,40 +78,14 @@ Validate a suite without executing it:
 ollama-bench validate --suite examples/bench_suite.yaml
 ```
 
-Inspect results without rerunning benchmarks:
-```bash
-# Reopen the latest run's summary (bench_out/ by default)
-ollama-bench show --out-dir bench_out --print-results
-
-# Compare multiple systems stored under comp_bench_out/
-ollama-bench show --out-dir comp_bench_out --print-comparative-results --print-results
-```
-
 Check environment readiness:
 ```bash
 ollama-bench doctor
 ```
 Add `--suite path/to/bench.yaml` to preflight model availability and memory requirements before a long run.
-Use `--sync-models` to refresh suite entries against the live Ollama catalog before validation, and `--auto-pull` to fetch anything missing (use `--keep-pulled` if you want to retain them afterward).
+Use `--sync-models` to refresh suite entries against the live Ollama catalog before validation, and `--auto-pull` to fetch anything missing (removed afterward unless `--keep-pulled` is set).
 `doctor` only surfaces tooling expectations that match your OS (e.g., `system_profiler` on macOS, `nvidia-smi` on Linux/NVIDIA boxes).
-Run `ollama-bench doctor --suite path/to/bench.yaml --sync-models --auto-pull --keep-pulled` to verify setup and keep any freshly pulled models cached. Use `ollama-bench show --out-dir bench_out --print-results` to revisit the most recent results without rerunning benchmarks.
-For multi-system comparisons, point `ollama-bench show` at a directory of benchmark outputs (e.g., `comp_bench_out/`) and add `--print-comparative-results` to generate an HTML dashboard highlighting the best-performing system per metric (a green cell marks the leader).
-
-### Reading the results
-
-Every run writes the raw data to `results.jsonl`/`results.csv`, plus a Markdown/HTML summary. Key fields:
-
-- **ttft_sec** – seconds from request submission to the first streamed token (**lower is better**).
-- **total_time_sec** – overall latency for the trial, including prompt ingest and decoding (**lower is better**).
-- **decode_time_sec** – time spent generating tokens after the first token arrives (`total - ttft`) (**lower is better**).
-- **ingest_toks_per_sec** – prompt ingest throughput (`prompt_tokens / ttft`) (**higher is better**).
-- **decode_toks_per_sec** – steady-state decode throughput for generated tokens (**higher is better**).
-- **elapsed_sec** (embeddings) – wall-clock time to produce embeddings (**lower is better**).
-- **throughput_text_chars_per_sec** – embedding throughput expressed as characters processed per second (**higher is better**).
-- **dim** – dimensionality of the returned embedding vector (target depends on model; higher means wider vectors).
-- **status** – `completed` or `interrupted` (if you pressed `Ctrl+C`, partial rows remain and the status reflects it).
-
-The HTML summary (`results.html`) presents these metrics in friendly tables grouped by model/tag. You can reopen it anytime with `ollama-bench show --out-dir bench_out --print-results`.
+Use `--auto-pull` with `doctor --suite` if you want it to fetch missing models for validation (they are removed afterwards unless `--keep-pulled` is set).
 
 ## Suite Schema
 See `examples/bench_suite.yaml` for a full example. Each suite can include:

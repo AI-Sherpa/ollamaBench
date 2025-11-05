@@ -1,8 +1,56 @@
+# Python virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Python build artifacts
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+
+# Type checking
+.mypy_cache/
+.pytype/
+.pyre/
+
+# Benchmark outputs
 bench_out*/
 bench_out_quick/
 .bench_out/
 comp_bench_out/
-.pytest_cache/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Claude Code guidance (local only)
+CLAUDE.md
